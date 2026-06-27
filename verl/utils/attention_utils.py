@@ -27,7 +27,98 @@ def _get_attention_functions() -> tuple[Callable, Callable, Callable, Callable]:
     if is_torch_npu_available(check_device=False):
         from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
     else:
-        from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+        try:
+            from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+        except ImportError:
+            # Fallback to pure PyTorch/einops implementation if flash_attn is not available or fails to import
+            import torch
+            import torch.nn.functional as F
+            from einops import rearrange as einops_rearrange
+
+            class IndexFirstAxis(torch.autograd.Function):
+                @staticmethod
+                def forward(ctx, input, indices):
+                    ctx.save_for_backward(indices)
+                    assert input.ndim >= 2
+                    ctx.first_axis_dim, other_shape = input.shape[0], input.shape[1:]
+                    second_dim = other_shape.numel()
+                    flat_input = input.flatten(1)
+                    gathered = torch.gather(
+                        flat_input, 0, indices.unsqueeze(-1).expand(-1, second_dim)
+                    )
+                    return gathered.reshape(-1, *other_shape)
+
+                @staticmethod
+                def backward(ctx, grad_output):
+                    (indices,) = ctx.saved_tensors
+                    assert grad_output.ndim >= 2
+                    other_shape = grad_output.shape[1:]
+                    flat_grad_output = grad_output.flatten(1)
+                    grad_input = torch.zeros(
+                        [ctx.first_axis_dim, flat_grad_output.shape[1]],
+                        device=grad_output.device,
+                        dtype=grad_output.dtype,
+                    )
+                    grad_input.scatter_(0, indices.unsqueeze(-1).expand(-1, flat_grad_output.shape[1]), flat_grad_output)
+                    return grad_input.reshape(ctx.first_axis_dim, *other_shape), None
+
+            fallback_index_first_axis = IndexFirstAxis.apply
+
+
+            class IndexPutFirstAxis(torch.autograd.Function):
+                @staticmethod
+                def forward(ctx, values, indices, first_axis_dim):
+                    ctx.save_for_backward(indices)
+                    assert indices.ndim == 1
+                    assert values.ndim >= 2
+                    output = torch.zeros(
+                        first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype
+                    )
+                    output[indices] = values
+                    return output
+
+                @staticmethod
+                def backward(ctx, grad_output):
+                    (indices,) = ctx.saved_tensors
+                    grad_values = grad_output[indices]
+                    return grad_values, None, None
+
+            fallback_index_put_first_axis = IndexPutFirstAxis.apply
+
+
+            def fallback_unpad_input(hidden_states, attention_mask):
+                """
+                Arguments:
+                    hidden_states: (batch, seqlen, ...)
+                    attention_mask: (batch, seqlen), bool / int, 1 means valid and 0 means not valid.
+                """
+                seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+                indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+                max_seqlen_in_batch = seqlens_in_batch.max().item()
+                cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+                return (
+                    fallback_index_first_axis(hidden_states.flatten(0, 1), indices),
+                    indices,
+                    cu_seqlens,
+                    max_seqlen_in_batch,
+                )
+
+
+            def fallback_pad_input(hidden_states, indices, batch, seqlen):
+                """
+                Arguments:
+                    hidden_states: (total_nnz, ...), the flattened hidden states.
+                    indices: (total_nnz), the indices of masked tokens.
+                    batch: int, batch size for the padded sequence.
+                    seqlen: int, maximum sequence length for the padded sequence.
+                """
+                output = fallback_index_put_first_axis(hidden_states, indices, batch * seqlen)
+                return output.reshape(batch, seqlen, *hidden_states.shape[1:])
+
+            index_first_axis = fallback_index_first_axis
+            pad_input = fallback_pad_input
+            rearrange = einops_rearrange
+            unpad_input = fallback_unpad_input
 
     _index_first_axis, _pad_input, _rearrange, _unpad_input = index_first_axis, pad_input, rearrange, unpad_input
 
