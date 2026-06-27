@@ -828,7 +828,24 @@ def compute_rollout_correction_and_rejection_mask(
     """
     # Validate input masks
     if not response_mask.any():
-        raise ValueError("response_mask must contain at least one valid token (1).")
+        import logging
+        logging.getLogger(__name__).warning("response_mask is all False in the batch. Returning default weights (1.0).")
+        rollout_is_weights_proto = None
+        if rollout_is is not None:
+            rollout_is_weights = torch.ones_like(old_log_prob)
+            rollout_is_weights_proto = DataProto.from_dict(tensors={"rollout_is_weights": rollout_is_weights})
+        modified_response_mask = response_mask.clone()
+        
+        metrics_scalar = {
+            "rollout_corr/policy_ppl_mismatch": 0.0,
+            "rollout_corr/policy_kl_mismatch": 0.0,
+            "rollout_corr/rejection_rate": 0.0,
+            "rollout_corr/rollout_is_mean": 1.0,
+            "rollout_corr/rollout_is_max": 1.0,
+            "rollout_corr/rollout_is_min": 1.0,
+        }
+        return rollout_is_weights_proto, modified_response_mask, metrics_scalar
+
     if old_log_prob.shape != rollout_log_prob.shape:
         raise ValueError(
             f"old_log_prob shape {old_log_prob.shape} does not match rollout_log_prob shape {rollout_log_prob.shape}."
@@ -930,7 +947,26 @@ def compute_offpolicy_metrics(
         Dictionary of off-policy metrics (without prefix)
     """
     # Validate that we have at least one valid token
-    assert response_mask.any(), "Expected at least one valid token in response_mask"
+    if not response_mask.any():
+        metrics = {
+            "training_ppl": 1.0,
+            "training_log_ppl": 0.0,
+        }
+        if rollout_log_prob is not None:
+            metrics.update({
+                "kl": 0.0,
+                "k3_kl": 0.0,
+                "rollout_ppl": 1.0,
+                "rollout_log_ppl": 0.0,
+                "log_ppl_diff": 0.0,
+                "log_ppl_abs_diff": 0.0,
+                "log_ppl_diff_max": 0.0,
+                "log_ppl_diff_min": 0.0,
+                "ppl_ratio": 1.0,
+                "chi2_token": 0.0,
+                "chi2_seq": 0.0,
+            })
+        return metrics
 
     metrics = {}
 
