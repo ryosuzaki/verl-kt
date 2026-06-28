@@ -950,8 +950,21 @@ class AgentLoopWorker:
         input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
         optional_outputs = {}
-        if inputs[0].response_logprobs is not None:
-            optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
+        # Find first non-None response_logprobs to use as a template for padding
+        first_non_none_logprobs = None
+        for input_item in inputs:
+            if input_item.response_logprobs is not None:
+                first_non_none_logprobs = input_item.response_logprobs
+                break
+
+        if first_non_none_logprobs is not None:
+            log_probs_list = []
+            for input_item in inputs:
+                if input_item.response_logprobs is not None:
+                    log_probs_list.append(input_item.response_logprobs)
+                else:
+                    log_probs_list.append(torch.zeros_like(first_non_none_logprobs))
+            optional_outputs["rollout_log_probs"] = torch.cat(log_probs_list, dim=0)
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
