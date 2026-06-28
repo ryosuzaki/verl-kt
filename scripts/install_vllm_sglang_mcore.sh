@@ -1,4 +1,5 @@
 #!/bin/bash
+# Install vLLM, SGLang and Megatron-LM dependencies
 
 USE_MEGATRON=${USE_MEGATRON:-1}
 USE_SGLANG=${USE_SGLANG:-1}
